@@ -96,7 +96,7 @@
     }
     .node{
       position:absolute;
-      width:200px;
+      width:220px;
       border:1px solid var(--line);
       background:var(--card2);
       border-radius:14px;
@@ -131,6 +131,26 @@
     }
     .nodeBtn.ok{ border-color:rgba(82,210,115,.55); }
     .nodeBtn.primary{ border-color:rgba(102,163,255,.6); }
+
+    /* Mini mission/habit boxes under nodes */
+    .miniStack{ margin-top:10px; display:flex; flex-direction:column; gap:8px; }
+    .miniBox{
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:8px;
+      font-size:12px;
+    }
+    .miniBox.blue{
+      background: rgba(102,163,255,.12);
+      border-color: rgba(102,163,255,.35);
+    }
+    .miniBox.green{
+      background: rgba(82,210,115,.12);
+      border-color: rgba(82,210,115,.35);
+    }
+    .miniTitle{ font-weight:800; margin-bottom:6px; }
+    .miniRow{ display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+    .miniRow .btn{ padding:6px 8px; border-radius:10px; }
 
     .hint{font-size:12px;color:var(--muted)}
     .danger{color:var(--bad)}
@@ -257,12 +277,8 @@ function cryptoId(){
 
 /* =========================
    TREE MODEL
-   - Each subskill has: { id, mainCode, name, parentId|null, totalXp }
-   - parentId null = directly connected to main skill
 ========================= */
-const STORE_KEY = "gogetta_tree_v2";
-
-function subId(mainCode, name){ return `${mainCode}__${name}`; }
+const STORE_KEY = "gogetta_tree_v3";
 
 function defaultState(){
   const skills = {};
@@ -272,33 +288,34 @@ function defaultState(){
     skills[m.code] = { totalXp: 0 };
     const base = DEFAULT_SUBSKILLS_BY_MAIN[m.code] || [];
     for (const s of base){
-      const id = subId(m.code, s);
+      const id = `${m.code}__${s}`;
       subskills[id] = { id, mainCode: m.code, name: s, parentId: null, totalXp: 0 };
     }
   }
 
   return {
-    version: 2,
+    version: 3,
     profile: { username: "Player", note: "" },
 
-    skills,        // mainskill XP
-    subskills,     // tree nodes
+    skills,
+    subskills,
 
-    missions: [],  // finish/undo affects XP
-    habits: [],    // list (no xp by default)
-    goals: [],     // goals (appear on skill page + global Goals tab)
-    trophies: [],  // trophyroom items (per mainskill)
+    missions: [],  // {id,title,desc,mainCode,nodeId,points,maxReps|null}
+    habits: [],    // {id,title,desc,mainCode,nodeId,points,dueISO}
 
-    investments: [], // items to buy
-    purchased: [],   // purchased investments
+    goals: [],     // global goals
+    trophies: [],  // trophyroom items per mainskill
+
+    investments: [],
+    purchased: [],
 
     ui: {
       activeTab: "MAINSKILLS",
-      view: "LIST",              // LIST | DETAIL
+      view: "LIST",
       selectedMain: "SOC",
-      selectedNode: null,        // subskill id or null (main root)
-      skillSubView: "TREE",      // TREE | GOALS | TROPHY
-      mapFilter: "",             // skillsmap search
+      selectedNode: null,
+      skillSubView: "TREE",
+      mapFilter: "",
     },
   };
 }
@@ -324,7 +341,7 @@ function loadState(){
       st.skills[m.code] ||= { totalXp: 0 };
       const base = DEFAULT_SUBSKILLS_BY_MAIN[m.code] || [];
       for (const s of base){
-        const id = subId(m.code, s);
+        const id = `${m.code}__${s}`;
         st.subskills[id] ||= { id, mainCode:m.code, name:s, parentId:null, totalXp: 0 };
       }
     }
@@ -336,6 +353,13 @@ function loadState(){
     }
     for (const m of MAINSKILLS){
       st.skills[m.code].totalXp = Number(st.skills[m.code].totalXp)||0;
+    }
+    for (const ms of st.missions){
+      ms.points = Number(ms.points)||0;
+      ms.maxReps = (ms.maxReps==null ? null : Number(ms.maxReps)||null);
+    }
+    for (const hb of st.habits){
+      hb.points = Number(hb.points)||0;
     }
 
     return st;
@@ -358,7 +382,7 @@ function nodeById(id){ return id ? state.subskills[id] : null; }
 function ensureSubskill(mainCode, name, parentId){
   const trimmed = (name||"").trim();
   if (!trimmed) return null;
-  const id = subId(mainCode, trimmed);
+  const id = `${mainCode}__${trimmed}`;
   if (!state.subskills[id]){
     state.subskills[id] = { id, mainCode, name: trimmed, parentId: parentId ?? null, totalXp: 0 };
   } else {
@@ -389,13 +413,10 @@ function addXpFlow(mainCode, nodeId, delta){
   }
 
   saveState();
-  render();
 }
 
 /* =========================
    PLAYER LEVEL (COMBAT LEVEL)
-   Every 11.76 mainskill level-ups => +1 player level
-   Max combat level = 126
 ========================= */
 function totalMainskillLevelUps(){
   let ups = 0;
@@ -413,7 +434,7 @@ function playerCombatLevel(){
 }
 
 /* =========================
-   TABS (Top-level)
+   TABS
 ========================= */
 const TABS = [
   { id:"PROFILE", label:"PROFILE" },
@@ -421,8 +442,8 @@ const TABS = [
   { id:"SKILLSMAP", label:"SKILLSMAP" },
   { id:"MISSIONS", label:"MISSIONS" },
   { id:"HABITS", label:"HABITS" },
-  { id:"GOALS", label:"GOALS" },           // renamed from Priorities
-  { id:"INVESTMENTS", label:"INVESTMENTS"} // renamed from Wishlist
+  { id:"GOALS", label:"GOALS" },
+  { id:"INVESTMENTS", label:"INVESTMENTS"}
 ];
 
 function setTab(id){
@@ -463,7 +484,55 @@ function openModal(title, bodyNode){
 function closeModal(){ modalBackdrop.classList.remove("show"); }
 
 /* =========================
-   FORMS
+   TROPHYROOM
+========================= */
+function addToTrophyRoom({mainCode, title, desc, kind}){
+  state.trophies.unshift({
+    id: cryptoId(),
+    mainCode,
+    kind, // "mission" | "habit" | "goal"
+    title,
+    desc: desc || "",
+    createdAt: new Date().toISOString(),
+  });
+  saveState();
+}
+
+/* =========================
+   MISSIONS/HABITS COMPLETION (AUTO-TROPHY ON MAX REPS)
+========================= */
+function finishMission(m){
+  m.points = (m.points||0) + 1;
+  addXpFlow(m.mainCode, m.nodeId, +1);
+
+  if (m.maxReps != null && m.points >= m.maxReps){
+    addToTrophyRoom({ mainCode: m.mainCode, title: m.title, desc: m.desc, kind: "mission" });
+    state.missions = state.missions.filter(x=>x.id !== m.id);
+  }
+  saveState();
+}
+
+function undoMission(m){
+  if ((m.points||0) <= 0) return;
+  m.points = (m.points||0) - 1;
+  addXpFlow(m.mainCode, m.nodeId, -1);
+  saveState();
+}
+
+function finishHabit(h){
+  h.points = (h.points||0) + 1;
+  addXpFlow(h.mainCode, h.nodeId, +1);
+  saveState();
+}
+function undoHabit(h){
+  if ((h.points||0) <= 0) return;
+  h.points = (h.points||0) - 1;
+  addXpFlow(h.mainCode, h.nodeId, -1);
+  saveState();
+}
+
+/* =========================
+   FORMS (SIDE PANEL)
 ========================= */
 function createMissionHabitFormHtml(){
   return `
@@ -488,8 +557,13 @@ function createMissionHabitFormHtml(){
         <textarea data-desc placeholder="extra details..."></textarea>
       </div>
 
+      <div class="field" style="margin-top:10px" data-repswrap>
+        <label class="muted">Mission max reps (optional)</label>
+        <input data-maxreps type="number" min="1" step="1" placeholder="leave blank = infinite" />
+      </div>
+
       <div class="field" style="margin-top:10px" data-duewrap>
-        <label class="muted">Habit due date (optional)</label>
+        <label class="muted">Habit deadline (optional)</label>
         <input data-due type="date" />
       </div>
 
@@ -498,7 +572,7 @@ function createMissionHabitFormHtml(){
       </div>
 
       <div class="hint" style="margin-top:10px">
-        Missions: Finish adds <span class="oktxt">+1 XP</span> to the selected node and flows up to the <span class="accent">main skill</span>.
+        Finish gives <span class="oktxt">+1 XP</span> and flows up the connected lines.
       </div>
     </div>
   `;
@@ -509,6 +583,8 @@ function bindMissionHabitForm(container, getTarget){
   const targetPill = container.querySelector("[data-targetpill]");
   const titleEl = container.querySelector("[data-title]");
   const descEl = container.querySelector("[data-desc]");
+  const repsWrap = container.querySelector("[data-repswrap]");
+  const repsEl = container.querySelector("[data-maxreps]");
   const dueWrap = container.querySelector("[data-duewrap]");
   const dueEl = container.querySelector("[data-due]");
   const createBtn = container.querySelector("[data-create]");
@@ -531,6 +607,7 @@ function bindMissionHabitForm(container, getTarget){
       b.classList.toggle("ghost", b.dataset.kind!==k);
     }
     if (dueWrap) dueWrap.style.display = (k==="habit") ? "" : "none";
+    if (repsWrap) repsWrap.style.display = (k==="mission") ? "" : "none";
   }
   for (const b of kindBtns) b.onclick = ()=> setKind(b.dataset.kind);
   setKind(kind);
@@ -542,12 +619,16 @@ function bindMissionHabitForm(container, getTarget){
     if (!title) return alert("Title required.");
 
     if (kind==="mission"){
+      const maxRepsRaw = repsEl?.value ? Number(repsEl.value) : null;
+      const maxReps = (maxRepsRaw && isFinite(maxRepsRaw) && maxRepsRaw > 0) ? Math.floor(maxRepsRaw) : null;
+
       state.missions.unshift({
         id: cryptoId(),
         title, desc,
         mainCode,
         nodeId: nodeId || null,
         points: 0,
+        maxReps,
         createdAt: new Date().toISOString(),
       });
     } else {
@@ -558,6 +639,7 @@ function bindMissionHabitForm(container, getTarget){
         mainCode,
         nodeId: nodeId || null,
         dueISO,
+        points: 0,
         createdAt: new Date().toISOString(),
       });
     }
@@ -565,12 +647,94 @@ function bindMissionHabitForm(container, getTarget){
     if (titleEl) titleEl.value = "";
     if (descEl) descEl.value = "";
     if (dueEl) dueEl.value = "";
+    if (repsEl) repsEl.value = "";
+
     saveState();
     render();
   };
 }
 
-/* GOAL FORM */
+/* =========================
+   QUICK ADD MODAL (FROM NODE + MENU) — STAYS ON SKILL PAGE
+========================= */
+function openQuickAddModal(kind, mainCode, nodeId){
+  const node = nodeById(nodeId);
+  const targetText = `${mainCode} — ${mainskillName(mainCode)} / ${node ? node.name : "(main)"}`;
+
+  const body = el(`
+    <div class="grid" style="gap:10px">
+      <div class="chip">Target: <b>${escapeHtml(targetText)}</b></div>
+
+      <div class="field">
+        <label class="muted">${kind==="mission" ? "Mission title" : "Habit title"}</label>
+        <input id="t" placeholder="e.g. Talk with mom" />
+      </div>
+
+      <div class="field">
+        <label class="muted">Description (optional)</label>
+        <textarea id="d"></textarea>
+      </div>
+
+      ${kind==="habit" ? `
+        <div class="field">
+          <label class="muted">Deadline (optional)</label>
+          <input id="due" type="date" />
+        </div>
+      ` : `
+        <div class="field">
+          <label class="muted">Max reps (optional)</label>
+          <input id="mr" type="number" min="1" step="1" placeholder="blank = infinite" />
+        </div>
+      `}
+
+      <div class="row wrap">
+        <button class="btn ok" id="add">Add</button>
+        <button class="btn" id="cancel">Cancel</button>
+      </div>
+    </div>
+  `);
+
+  body.querySelector("#cancel").onclick = closeModal;
+  body.querySelector("#add").onclick = ()=>{
+    const title = body.querySelector("#t").value.trim();
+    const desc = body.querySelector("#d").value.trim();
+    if (!title) return alert("Title required.");
+
+    if (kind === "mission"){
+      const mrRaw = body.querySelector("#mr")?.value ? Number(body.querySelector("#mr").value) : null;
+      const maxReps = (mrRaw && isFinite(mrRaw) && mrRaw > 0) ? Math.floor(mrRaw) : null;
+
+      state.missions.unshift({
+        id: cryptoId(),
+        title, desc,
+        mainCode,
+        nodeId: nodeId || null,
+        points: 0,
+        maxReps,
+        createdAt: new Date().toISOString(),
+      });
+    } else {
+      const dueVal = body.querySelector("#due")?.value || "";
+      state.habits.unshift({
+        id: cryptoId(),
+        title, desc,
+        mainCode,
+        nodeId: nodeId || null,
+        dueISO: dueVal ? new Date(dueVal + "T00:00:00").toISOString() : "",
+        points: 0,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    saveState();
+    closeModal();
+    render();
+  };
+
+  openModal(kind==="mission" ? "Add Mission" : "Add Habit", body);
+}
+
+/* GOAL MODAL */
 function openAddGoalModal(mainCode, nodeId){
   const node = nodeById(nodeId);
   const body = el(`
@@ -621,7 +785,7 @@ function openAddGoalModal(mainCode, nodeId){
   openModal("Add Goal", body);
 }
 
-/* INVESTMENT FORM */
+/* INVESTMENT MODAL */
 function openAddInvestmentModal(){
   const body = el(`
     <div class="grid" style="gap:10px">
@@ -682,7 +846,7 @@ function openAddInvestmentModal(){
 function computeTreeLayout(mainCode){
   const all = nodesForMain(mainCode);
   const rootId = "__ROOT__";
-  const kids = new Map(); // parentId -> childIds
+  const kids = new Map();
 
   for (const n of all){
     const p = n.parentId ?? rootId;
@@ -696,8 +860,8 @@ function computeTreeLayout(mainCode){
   const pos = new Map();
   let nextX = 0;
 
-  const X_SPACING = 240;
-  const Y_SPACING = 150;
+  const X_SPACING = 260;
+  const Y_SPACING = 190;
   const X0 = 40;
   const Y0 = 40;
 
@@ -724,8 +888,8 @@ function computeTreeLayout(mainCode){
 
   const maxX = Math.max(0, ...Object.values(px).map(v=>v.left));
   const maxY = Math.max(0, ...Object.values(px).map(v=>v.top));
-  const stageW = Math.max(1100, maxX + 320);
-  const stageH = Math.max(620, maxY + 260);
+  const stageW = Math.max(1100, maxX + 360);
+  const stageH = Math.max(740, maxY + 320);
 
   const edges = [];
   for (const [p, arr] of kids.entries()){
@@ -733,6 +897,101 @@ function computeTreeLayout(mainCode){
   }
 
   return { px, edges, stageW, stageH, rootId };
+}
+
+function miniMissionHtml(m){
+  const reps = m.maxReps == null ? `${m.points||0} / ∞` : `${m.points||0} / ${m.maxReps}`;
+  return `
+    <div class="miniBox blue" data-mid="${m.id}">
+      <div class="miniTitle">${escapeHtml(m.title)}</div>
+      <div class="miniRow">
+        <span class="chip">Reps ${escapeHtml(reps)}</span>
+        <button class="btn small ok" data-act="m-finish">Finish</button>
+        <button class="btn small" data-act="m-undo">Undo</button>
+        <button class="btn small ok" data-act="m-trophy">🏆</button>
+        <button class="btn small bad" data-act="m-del">Del</button>
+      </div>
+    </div>
+  `;
+}
+
+function miniHabitHtml(h){
+  const due = h.dueISO ? new Date(h.dueISO).toLocaleDateString() : "";
+  return `
+    <div class="miniBox green" data-hid="${h.id}">
+      <div class="miniTitle">${escapeHtml(h.title)}</div>
+      <div class="miniRow">
+        <span class="chip">Done ${h.points||0}</span>
+        ${due ? `<span class="chip">Due ${escapeHtml(due)}</span>` : ``}
+        <button class="btn small ok" data-act="h-finish">Finish</button>
+        <button class="btn small" data-act="h-undo">Undo</button>
+        <button class="btn small ok" data-act="h-trophy">🏆</button>
+        <button class="btn small bad" data-act="h-del">Del</button>
+      </div>
+    </div>
+  `;
+}
+
+function bindMiniActions(nodeEl){
+  // Missions
+  nodeEl.querySelectorAll('[data-mid]').forEach(box=>{
+    const id = box.getAttribute("data-mid");
+    const m = state.missions.find(x=>x.id===id);
+    if (!m) return;
+
+    box.querySelectorAll("[data-act]").forEach(btn=>{
+      btn.onclick = (e)=>{
+        e.stopPropagation();
+        const act = btn.getAttribute("data-act");
+
+        if (act==="m-finish"){
+          finishMission(m);
+          render();
+        } else if (act==="m-undo"){
+          undoMission(m);
+          render();
+        } else if (act==="m-trophy"){
+          addToTrophyRoom({ mainCode:m.mainCode, title:m.title, desc:m.desc, kind:"mission" });
+          state.missions = state.missions.filter(x=>x.id!==m.id);
+          saveState(); render();
+        } else if (act==="m-del"){
+          if (!confirm(`Delete mission "${m.title}"?`)) return;
+          state.missions = state.missions.filter(x=>x.id!==m.id);
+          saveState(); render();
+        }
+      };
+    });
+  });
+
+  // Habits
+  nodeEl.querySelectorAll('[data-hid]').forEach(box=>{
+    const id = box.getAttribute("data-hid");
+    const h = state.habits.find(x=>x.id===id);
+    if (!h) return;
+
+    box.querySelectorAll("[data-act]").forEach(btn=>{
+      btn.onclick = (e)=>{
+        e.stopPropagation();
+        const act = btn.getAttribute("data-act");
+
+        if (act==="h-finish"){
+          finishHabit(h);
+          render();
+        } else if (act==="h-undo"){
+          undoHabit(h);
+          render();
+        } else if (act==="h-trophy"){
+          addToTrophyRoom({ mainCode:h.mainCode, title:h.title, desc:h.desc, kind:"habit" });
+          state.habits = state.habits.filter(x=>x.id!==h.id);
+          saveState(); render();
+        } else if (act==="h-del"){
+          if (!confirm(`Delete habit "${h.title}"?`)) return;
+          state.habits = state.habits.filter(x=>x.id!==h.id);
+          saveState(); render();
+        }
+      };
+    });
+  });
 }
 
 function renderMainTreeGraph(mainCode, mountEl){
@@ -755,7 +1014,7 @@ function renderMainTreeGraph(mainCode, mountEl){
   const rootPos = layout.px[layout.rootId] || { left: 420, top: 40 };
 
   const rootNode = el(`
-    <div class="node" style="left:${rootPos.left}px;top:${rootPos.top}px;width:280px">
+    <div class="node" style="left:${rootPos.left}px;top:${rootPos.top}px;width:300px">
       <div class="nodeBtns">
         <button class="nodeBtn primary" title="Select main">✓</button>
         <button class="nodeBtn ok" title="Add top-level subskill">＋</button>
@@ -764,6 +1023,9 @@ function renderMainTreeGraph(mainCode, mountEl){
       <div class="nodeMeta">
         <span class="chip">Lv ${mp.lvl}</span>
         <span class="chip">XP ${mainXp}</span>
+      </div>
+      <div class="miniStack" style="margin-top:10px">
+        <div class="hint">Tap ＋ to add subskills, or select a node and add missions/habits/goals.</div>
       </div>
     </div>
   `);
@@ -796,6 +1058,9 @@ function renderMainTreeGraph(mainCode, mountEl){
     const p = xpProgress(xp);
     const pos = layout.px[n.id] || { left: 40, top: 220 };
 
+    const ms = state.missions.filter(m => m.mainCode===mainCode && m.nodeId===n.id);
+    const hs = state.habits.filter(h => h.mainCode===mainCode && h.nodeId===n.id);
+
     const node = el(`
       <div class="node" style="left:${pos.left}px;top:${pos.top}px">
         <div class="nodeBtns">
@@ -806,6 +1071,12 @@ function renderMainTreeGraph(mainCode, mountEl){
         <div class="nodeMeta">
           <span class="chip">Lv ${p.lvl}</span>
           <span class="chip">XP ${xp}</span>
+        </div>
+
+        <div class="miniStack">
+          ${ms.slice(0,3).map(miniMissionHtml).join("")}
+          ${hs.slice(0,3).map(miniHabitHtml).join("")}
+          ${(ms.length>3 || hs.length>3) ? `<div class="hint">More items… (see Missions/Habits tabs)</div>` : ``}
         </div>
       </div>
     `);
@@ -830,11 +1101,14 @@ function renderMainTreeGraph(mainCode, mountEl){
       saveState(); render();
     };
 
+    // bind mini finish/undo/delete/trophy
+    bindMiniActions(node);
+
     stage.appendChild(node);
     nodeEls.set(n.id, node);
   }
 
-  // ====== LINES (FIXED: offsetLeft/offsetTop) ======
+  // ====== LINES (offset-based) ======
   function drawLines(){
     while (svg.firstChild) svg.removeChild(svg.firstChild);
 
@@ -873,7 +1147,7 @@ function renderMainTreeGraph(mainCode, mountEl){
 }
 
 /* =========================
-   PLUS MENUS
+   NODE + MENU
 ========================= */
 function openNodePlusMenu(mainCode, nodeId){
   const node = nodeById(nodeId);
@@ -889,7 +1163,7 @@ function openNodePlusMenu(mainCode, nodeId){
         <button class="btn ok" id="addMission">+ Mission</button>
         <button class="btn ok" id="addHabit">+ Habit</button>
       </div>
-      <div class="hint">XP flows upward through the connected lines.</div>
+      <div class="hint">Missions show under the node as blue boxes. Habits show as green boxes.</div>
     </div>
   `);
 
@@ -902,16 +1176,12 @@ function openNodePlusMenu(mainCode, nodeId){
     openAddGoalModal(mainCode, nodeId);
   };
   body.querySelector("#addMission").onclick = ()=>{
-    state.ui.selectedMain = mainCode;
-    state.ui.selectedNode = nodeId;
-    state.ui.activeTab = "MISSIONS";
-    saveState(); closeModal(); render();
+    closeModal();
+    openQuickAddModal("mission", mainCode, nodeId);
   };
   body.querySelector("#addHabit").onclick = ()=>{
-    state.ui.selectedMain = mainCode;
-    state.ui.selectedNode = nodeId;
-    state.ui.activeTab = "HABITS";
-    saveState(); closeModal(); render();
+    closeModal();
+    openQuickAddModal("habit", mainCode, nodeId);
   };
 
   openModal("Add New", body);
@@ -950,21 +1220,6 @@ function openAddSubskillModal(mainCode, parentId){
 }
 
 /* =========================
-   TROPHYROOM HELPERS
-========================= */
-function addToTrophyRoom({mainCode, title, desc, kind}){
-  state.trophies.unshift({
-    id: cryptoId(),
-    mainCode,
-    kind, // "mission" | "habit" | "goal"
-    title,
-    desc: desc || "",
-    createdAt: new Date().toISOString(),
-  });
-  saveState();
-}
-
-/* =========================
    SCREENS
 ========================= */
 function screenProfile(){
@@ -979,9 +1234,9 @@ function screenProfile(){
       <h2 style="margin-top:6px">${escapeHtml(state.profile.username || "Player")}</h2>
 
       <div class="row wrap" style="margin-top:8px">
-        <span class="chip">Combat Level: <b>${combat}</b> / 126</span>
+        <span class="chip">Combat Level (CB): <b>${combat}</b> / 126</span>
         <span class="chip">Total mainskill level-ups: <b>${ups}</b></span>
-        <span class="chip">Rate: <b>1 CL</b> per <b>11.76</b> mainskill level-ups</span>
+        <span class="chip">Rate: <b>1 CB</b> per <b>11.76</b> mainskill level-ups</span>
       </div>
 
       <div class="hr"></div>
@@ -1042,7 +1297,7 @@ function screenProfile(){
   return c;
 }
 
-/* MAINSKILLS: LIST -> DETAIL PAGE */
+/* MAINSKILLS */
 function screenMainSkills(){
   if (state.ui.view === "DETAIL") return screenMainSkillDetail(state.ui.selectedMain);
   return screenMainSkillsList();
@@ -1171,7 +1426,7 @@ function screenMainSkillDetail(mainCode){
           <h3>Tree (boxes + lines)</h3>
           <div id="graphMount"></div>
           <div class="hint" style="margin-top:8px">
-            Tap a node to target it. Tap ＋ on a node for: child subskill / mission / habit / goal.
+            Missions appear under nodes as <span class="accent">blue</span> boxes. Habits appear as <span class="oktxt">green</span> boxes.
           </div>
         </div>
         <div>
@@ -1202,7 +1457,6 @@ function screenMainSkillDetail(mainCode){
           <div class="hr"></div>
           <div class="muted">
             Goals automatically appear in the global <b>GOALS</b> tab too.
-            Use goals to track deadlines and long-term targets.
           </div>
         </div>
       </div>
@@ -1258,7 +1512,6 @@ function screenMainSkillDetail(mainCode){
     mount.appendChild(sub);
 
   } else {
-    // TROPHY ROOM
     const trophies = state.trophies.filter(t=>t.mainCode===mainCode);
     const sub = el(`
       <div class="grid cols2">
@@ -1271,10 +1524,10 @@ function screenMainSkillDetail(mainCode){
           <div class="list" id="tList"></div>
         </div>
         <div class="card">
-          <h3 style="margin:0">What goes here?</h3>
+          <h3 style="margin:0">Auto trophies</h3>
           <div class="hr"></div>
           <div class="muted">
-            You can send missions / habits / goals into the trophy room using the 🏆 button.
+            Missions with max reps automatically move here when completed.
           </div>
         </div>
       </div>
@@ -1324,7 +1577,7 @@ function screenMainSkillDetail(mainCode){
   return root;
 }
 
-/* SKILLSMAP (simple searchable index that opens the correct mainskill page) */
+/* SKILLSMAP */
 function screenSkillsMap(){
   const filter = (state.ui.mapFilter || "").trim().toLowerCase();
   const root = el(`
@@ -1336,7 +1589,6 @@ function screenSkillsMap(){
           <label class="muted">Search</label>
           <input id="q" placeholder="type e.g. calls / budget / hygiene" />
         </div>
-        <div class="hint" style="margin-top:10px">Tap a result to open that mainskill page and select the node.</div>
       </div>
 
       <div class="card">
@@ -1397,20 +1649,14 @@ function screenSkillsMap(){
   return root;
 }
 
-/* MISSIONS */
+/* MISSIONS TAB (still available) */
 function screenMissions(){
-  const mainCode = state.ui.selectedMain || "SOC";
-  const nodeId = state.ui.selectedNode || null;
-  const node = nodeById(nodeId);
-
   const root = el(`
     <div class="grid">
       <div class="card">
         <div class="kicker">Missions</div>
-        <h2 style="margin-top:6px">Finish gives +1 XP (UNDO available)</h2>
-        <div class="muted">Target: ${mainCode} / ${escapeHtml(node ? node.name : "(main)")}</div>
-        <div class="hr"></div>
-        ${createMissionHabitFormHtml()}
+        <h2 style="margin-top:6px">All missions</h2>
+        <div class="muted">You can also add missions directly from a node in the skill tree.</div>
       </div>
 
       <div class="card">
@@ -1420,18 +1666,17 @@ function screenMissions(){
     </div>
   `);
 
-  bindMissionHabitForm(root, ()=>({ mainCode: state.ui.selectedMain, nodeId: state.ui.selectedNode }));
-
   const list = root.querySelector("#list");
   list.innerHTML = "";
 
   if (!state.missions.length){
-    list.appendChild(el(`<div class="muted">No missions yet. Add one above.</div>`));
+    list.appendChild(el(`<div class="muted">No missions yet.</div>`));
     return root;
   }
 
   for (const ms of state.missions){
     const n = nodeById(ms.nodeId);
+    const reps = ms.maxReps == null ? `${ms.points||0} / ∞` : `${ms.points||0} / ${ms.maxReps}`;
     const it = el(`
       <div class="item">
         <div class="row sp wrap">
@@ -1439,7 +1684,7 @@ function screenMissions(){
             <div class="title">${escapeHtml(ms.title)}</div>
             <div class="meta">
               <span class="chip">${ms.mainCode} / ${escapeHtml(n ? n.name : "(main)")}</span>
-              <span class="chip">Points: ${ms.points||0}</span>
+              <span class="chip">Reps ${escapeHtml(reps)}</span>
             </div>
             ${ms.desc ? `<div class="muted" style="margin-top:6px">${escapeHtml(ms.desc)}</div>` : ""}
           </div>
@@ -1455,19 +1700,11 @@ function screenMissions(){
 
     const [finishBtn, undoBtn, trophyBtn, delBtn] = it.querySelectorAll("button");
 
-    finishBtn.onclick = ()=>{
-      ms.points = (ms.points||0) + 1;
-      addXpFlow(ms.mainCode, ms.nodeId, +1);
-      saveState(); render();
-    };
-    undoBtn.onclick = ()=>{
-      if ((ms.points||0) <= 0) return;
-      ms.points = (ms.points||0) - 1;
-      addXpFlow(ms.mainCode, ms.nodeId, -1);
-      saveState(); render();
-    };
+    finishBtn.onclick = ()=>{ finishMission(ms); render(); };
+    undoBtn.onclick = ()=>{ undoMission(ms); render(); };
     trophyBtn.onclick = ()=>{
       addToTrophyRoom({ mainCode: ms.mainCode, title: ms.title, desc: ms.desc, kind: "mission" });
+      state.missions = state.missions.filter(x=>x.id!==ms.id);
       saveState(); render();
     };
     delBtn.onclick = ()=>{
@@ -1482,20 +1719,14 @@ function screenMissions(){
   return root;
 }
 
-/* HABITS */
+/* HABITS TAB (still available) */
 function screenHabits(){
-  const mainCode = state.ui.selectedMain || "SOC";
-  const nodeId = state.ui.selectedNode || null;
-  const node = nodeById(nodeId);
-
   const root = el(`
     <div class="grid">
       <div class="card">
         <div class="kicker">Habits</div>
-        <h2 style="margin-top:6px">Habits list</h2>
-        <div class="muted">Target: ${mainCode} / ${escapeHtml(node ? node.name : "(main)")}</div>
-        <div class="hr"></div>
-        ${createMissionHabitFormHtml()}
+        <h2 style="margin-top:6px">All habits</h2>
+        <div class="muted">Habits also appear under nodes as green boxes.</div>
       </div>
 
       <div class="card">
@@ -1505,13 +1736,11 @@ function screenHabits(){
     </div>
   `);
 
-  bindMissionHabitForm(root, ()=>({ mainCode: state.ui.selectedMain, nodeId: state.ui.selectedNode }));
-
   const list = root.querySelector("#list");
   list.innerHTML = "";
 
   if (!state.habits.length){
-    list.appendChild(el(`<div class="muted">No habits yet. Add one above.</div>`));
+    list.appendChild(el(`<div class="muted">No habits yet.</div>`));
     return root;
   }
 
@@ -1525,11 +1754,14 @@ function screenHabits(){
             <div class="title">${escapeHtml(h.title)}</div>
             <div class="meta">
               <span class="chip">${h.mainCode} / ${escapeHtml(n ? n.name : "(main)")}</span>
-              ${due?`<span class="chip">Due: ${escapeHtml(due)}</span>`:""}
+              <span class="chip">Done ${h.points||0}</span>
+              ${due?`<span class="chip">Due ${escapeHtml(due)}</span>`:""}
             </div>
             ${h.desc ? `<div class="muted" style="margin-top:6px">${escapeHtml(h.desc)}</div>` : ""}
           </div>
           <div class="row wrap">
+            <button class="btn small ok">Finish (+1)</button>
+            <button class="btn small">Undo (-1)</button>
             <button class="btn small ok">🏆</button>
             <button class="btn small bad">Delete</button>
           </div>
@@ -1537,9 +1769,13 @@ function screenHabits(){
       </div>
     `);
 
-    const [trophyBtn, delBtn] = it.querySelectorAll("button");
+    const [finishBtn, undoBtn, trophyBtn, delBtn] = it.querySelectorAll("button");
+
+    finishBtn.onclick = ()=>{ finishHabit(h); render(); };
+    undoBtn.onclick = ()=>{ undoHabit(h); render(); };
     trophyBtn.onclick = ()=>{
       addToTrophyRoom({ mainCode: h.mainCode, title: h.title, desc: h.desc, kind: "habit" });
+      state.habits = state.habits.filter(x=>x.id!==h.id);
       saveState(); render();
     };
     delBtn.onclick = ()=>{
@@ -1554,14 +1790,13 @@ function screenHabits(){
   return root;
 }
 
-/* GOALS (global tab) */
+/* GOALS TAB */
 function screenGoals(){
   const root = el(`
     <div class="grid">
       <div class="card">
         <div class="kicker">Goals</div>
         <h2 style="margin-top:6px">All goals (auto collected)</h2>
-        <div class="muted">These appear here automatically when you add them inside a mainskill page.</div>
       </div>
 
       <div class="card">
@@ -1579,7 +1814,6 @@ function screenGoals(){
     return root;
   }
 
-  // sort: incomplete first, then nearest due
   const sorted = [...state.goals].sort((a,b)=>{
     if (!!a.done !== !!b.done) return a.done ? 1 : -1;
     const ad = a.dueISO ? new Date(a.dueISO).getTime() : Infinity;
@@ -1641,7 +1875,7 @@ function screenGoals(){
   return root;
 }
 
-/* INVESTMENTS (with Purchased) */
+/* INVESTMENTS */
 function screenInvestments(){
   const root = el(`
     <div class="grid">
@@ -1757,7 +1991,7 @@ function screenInvestments(){
 }
 
 /* =========================
-   ROUTER RENDER
+   ROUTER
 ========================= */
 function render(){
   renderTabs();
